@@ -1,0 +1,6 @@
+path: kaggle_yolo
+train: images/train
+val: images/val
+
+nc: 2
+names: ["biodegradable", "recyclable"]

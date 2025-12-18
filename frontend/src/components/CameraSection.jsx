@@ -1,20 +1,56 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import { Camera, Upload, RotateCw, X, Loader2, CheckCircle } from 'lucide-react';
+import { wasteAPI } from '../services/api';
 
 const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
   const webcamRef = useRef(null);
   const [image, setImage] = useState(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [mode, setMode] = useState('single'); // 'single' or 'multi'
+  const [mode, setMode] = useState('single');
   const [isUploading, setIsUploading] = useState(false);
   const [predictionResults, setPredictionResults] = useState([]);
   const [detectionCount, setDetectionCount] = useState(0);
   const [detectionHistory, setDetectionHistory] = useState([]);
+  const [backendStatus, setBackendStatus] = useState('checking');
+  const [error, setError] = useState(null);
+
+  // Check backend health on component mount
+  useEffect(() => {
+    checkBackendHealth();
+  }, []);
+
+  const checkBackendHealth = async () => {
+    try {
+      console.log('Checking backend health...');
+      const response = await wasteAPI.checkHealth();
+      console.log('Health response:', response);
+      
+      // FIXED: Axios returns response.data, not response directly
+      const healthData = response.data || response;
+      
+      console.log('Health data:', healthData);
+      
+      if (healthData.status === 'healthy') {
+        setBackendStatus('connected');
+        setError(null);
+        console.log('✅ Backend connected successfully');
+      } else {
+        setBackendStatus('error');
+        setError(`Backend error: ${healthData.message || 'Unknown error'}`);
+        console.log('❌ Backend not healthy:', healthData);
+      }
+    } catch (err) {
+      console.error('Backend connection error:', err);
+      setBackendStatus('disconnected');
+      setError('Cannot connect to backend. Make sure it\'s running on port 5001');
+    }
+  };
 
   // Start camera
   const startCamera = () => {
     setIsCameraActive(true);
+    setError(null);
   };
 
   // Stop camera
@@ -30,6 +66,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       const imageSrc = webcamRef.current.getScreenshot();
       setImage(imageSrc);
       setPredictionResults([]);
+      setError(null);
     }
   };
 
@@ -37,138 +74,82 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
   const retakeImage = () => {
     setImage(null);
     setPredictionResults([]);
+    setError(null);
   };
 
-  // Mock detection for single object
-  const detectSingleObject = () => {
+  // REAL detection for single/multiple objects
+  const detectObjects = async () => {
     if (!image) {
-      alert('Please capture an image first!');
+      setError('Please capture an image first!');
+      return;
+    }
+
+    if (backendStatus !== 'connected') {
+      setError('Backend is not connected. Please check if the server is running.');
+      await checkBackendHealth();
       return;
     }
 
     setIsUploading(true);
+    setError(null);
 
-    // Simulate AI processing
-    setTimeout(() => {
-      const mockResults = [
-        {
-          id: Date.now(),
-          class: 'plastic',
-          confidence: 0.92,
-          name: 'Plastic Bottle',
-          category: 'recyclable',
+    try {
+      console.log('Sending image to backend...');
+      const response = await wasteAPI.detectWaste(image);
+      const data = response.data;
+      
+      console.log('Backend detection response:', data);
+
+      if (data.success) {
+        // Process the real detections from YOLOv8
+        const processedResults = data.detections.map((detection, index) => ({
+          id: Date.now() + index,
+          class: detection.class || 'unknown',
+          confidence: detection.confidence ? (detection.confidence / 100) : 0.5,
+          name: detection.name || (detection.class ? detection.class.charAt(0).toUpperCase() + detection.class.slice(1) : 'Unknown'),
+          category: detection.category || (detection.class === 'recyclable' ? 'recyclable' : 'biodegradable'),
           timestamp: new Date().toLocaleString(),
-          all_predictions: {
-            plastic: 0.92,
-            paper: 0.05,
-            glass: 0.02,
-            metal: 0.01
-          }
+          bbox: detection.bbox || {},
+          description: detection.description || `${detection.class || 'Object'} detected with ${Math.round((detection.confidence || 50))}% confidence.`
+        }));
+
+        setPredictionResults(processedResults);
+        
+        // Update detection count and history
+        const newDetections = processedResults.length;
+        setDetectionCount(prev => prev + newDetections);
+        
+        const detectionDataArray = processedResults.map(obj => ({
+          id: obj.id,
+          name: obj.name,
+          category: obj.category,
+          confidence: Math.round(obj.confidence * 100),
+          dustbinColor: obj.category === 'recyclable' ? 'Blue' : 
+                       obj.category === 'biodegradable' ? 'Green' : 'Black',
+          description: obj.description,
+          timestamp: obj.timestamp
+        }));
+
+        setDetectionHistory(prev => [...detectionDataArray, ...prev.slice(0, 9 - newDetections)]);
+        
+        // Call parent callbacks if provided
+        if (mode === 'single' && processedResults.length > 0 && onSingleDetection) {
+          onSingleDetection(detectionDataArray[0]);
+        } else if (mode === 'multi' && onObjectsDetected) {
+          onObjectsDetected(detectionDataArray);
         }
-      ];
 
-      const detectionData = {
-        id: mockResults[0].id,
-        name: mockResults[0].name,
-        category: mockResults[0].category,
-        confidence: Math.round(mockResults[0].confidence * 100),
-        dustbinColor: mockResults[0].category === 'recyclable' ? 'Blue' : 
-                      mockResults[0].category === 'biodegradable' ? 'Green' :
-                      mockResults[0].category === 'hazardous' ? 'Red' : 'Black',
-        description: `${mockResults[0].name} detected with ${Math.round(mockResults[0].confidence * 100)}% confidence.`,
-        timestamp: mockResults[0].timestamp
-      };
-
-      setPredictionResults(mockResults);
-      setDetectionCount(prev => prev + 1);
-      setDetectionHistory(prev => [detectionData, ...prev.slice(0, 9)]);
-      
-      if (onSingleDetection) {
-        onSingleDetection(detectionData);
+        setError(null);
+      } else {
+        setError(data.error || 'Detection failed');
       }
-      
+    } catch (err) {
+      console.error('Detection error:', err);
+      console.error('Error details:', err.response?.data || err.message);
+      setError(`Failed to process image: ${err.message}`);
+    } finally {
       setIsUploading(false);
-    }, 1500);
-  };
-
-  // Mock detection for multiple objects
-  const detectMultipleObjects = () => {
-    if (!image) {
-      alert('Please capture an image first!');
-      return;
     }
-
-    setIsUploading(true);
-
-    // Simulate AI processing for multiple objects
-    setTimeout(() => {
-      const mockResults = [
-        {
-          id: Date.now() + 1,
-          class: 'plastic',
-          confidence: 0.92,
-          name: 'Plastic Bottle',
-          category: 'recyclable',
-          timestamp: new Date().toLocaleString(),
-          all_predictions: {
-            plastic: 0.92,
-            paper: 0.05,
-            glass: 0.02,
-            metal: 0.01
-          }
-        },
-        {
-          id: Date.now() + 2,
-          class: 'paper',
-          confidence: 0.87,
-          name: 'Pizza Box',
-          category: 'biodegradable',
-          timestamp: new Date().toLocaleString(),
-          all_predictions: {
-            paper: 0.87,
-            plastic: 0.08,
-            glass: 0.03,
-            metal: 0.02
-          }
-        },
-        {
-          id: Date.now() + 3,
-          class: 'metal',
-          confidence: 0.95,
-          name: 'Soda Can',
-          category: 'recyclable',
-          timestamp: new Date().toLocaleString(),
-          all_predictions: {
-            metal: 0.95,
-            plastic: 0.03,
-            glass: 0.01,
-            paper: 0.01
-          }
-        }
-      ];
-
-      const detectionDataArray = mockResults.map(obj => ({
-        id: obj.id,
-        name: obj.name,
-        category: obj.category,
-        confidence: Math.round(obj.confidence * 100),
-        dustbinColor: obj.category === 'recyclable' ? 'Blue' : 
-                     obj.category === 'biodegradable' ? 'Green' :
-                     obj.category === 'hazardous' ? 'Red' : 'Black',
-        description: `${obj.name} detected with ${Math.round(obj.confidence * 100)}% confidence.`,
-        timestamp: obj.timestamp
-      }));
-
-      setPredictionResults(mockResults);
-      setDetectionCount(prev => prev + mockResults.length);
-      setDetectionHistory(prev => [...detectionDataArray, ...prev.slice(0, 9 - mockResults.length)]);
-      
-      if (onObjectsDetected) {
-        onObjectsDetected(detectionDataArray);
-      }
-      
-      setIsUploading(false);
-    }, 2000);
   };
 
   // Get color based on waste type
@@ -183,7 +164,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       recyclable: 'bg-blue-100 border-blue-200 text-blue-800',
       biodegradable: 'bg-green-100 border-green-200 text-green-800'
     };
-    return colors[type.toLowerCase()] || 'bg-gray-100 border-gray-200 text-gray-800';
+    return colors[type?.toLowerCase()] || 'bg-gray-100 border-gray-200 text-gray-800';
   };
 
   // Export to CSV
@@ -225,11 +206,63 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       setDetectionHistory([]);
       setDetectionCount(0);
       setPredictionResults([]);
+      setError(null);
     }
   };
 
+  // Get backend status indicator
+  const getStatusIndicator = () => {
+    switch (backendStatus) {
+      case 'connected':
+        return { text: '✅ Backend Connected', color: 'bg-green-500' };
+      case 'checking':
+        return { text: '🔄 Checking Backend...', color: 'bg-yellow-500' };
+      case 'error':
+        return { text: '❌ Backend Error', color: 'bg-red-500' };
+      default:
+        return { text: '❌ Backend Disconnected', color: 'bg-red-500' };
+    }
+  };
+
+  const status = getStatusIndicator();
+
   return (
     <div className="space-y-6">
+      {/* Backend Status */}
+      <div className={`text-white px-4 py-3 rounded-lg ${status.color}`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center">
+            <span className="font-medium">{status.text}</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <span className="text-sm opacity-90">
+              Port: 5001 • Model: {backendStatus === 'connected' ? 'Loaded' : 'Offline'}
+            </span>
+            <button 
+              onClick={checkBackendHealth}
+              className="text-sm bg-white bg-opacity-20 hover:bg-opacity-30 px-3 py-1 rounded transition"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Error Display */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+          <div className="flex items-center">
+            <span className="mr-2">⚠️</span>
+            <span>{error}</span>
+          </div>
+          {backendStatus === 'disconnected' && (
+            <div className="mt-2 text-sm">
+              Make sure your backend is running with: <code className="bg-gray-100 px-2 py-1 rounded">python app.py</code>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Mode Selection */}
       <div className="flex flex-wrap gap-3">
         <button
@@ -268,6 +301,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
                 height: { ideal: 720 }
               }}
               className="w-full h-full object-cover"
+              onUserMediaError={(err) => setError(`Camera error: ${err.message}`)}
             />
           ) : (
             <img 
@@ -277,10 +311,19 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
             />
           )
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center">
+          <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-gray-900 to-black">
             <div className="text-center">
-              <div className="text-6xl mb-4 opacity-50">📷</div>
-              <div className="text-white text-xl font-medium">Camera is OFF</div>
+              <div className="text-6xl mb-4 opacity-60">📷</div>
+              <div className="text-white text-xl font-medium mb-2">Camera is OFF</div>
+              {backendStatus !== 'connected' ? (
+                <div className="text-white text-sm opacity-75">
+                  Connect backend first to enable camera
+                </div>
+              ) : (
+                <div className="text-white text-sm opacity-75">
+                  Click "Start Camera" to begin
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -291,7 +334,8 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
         {!isCameraActive ? (
           <button
             onClick={startCamera}
-            className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3"
+            disabled={backendStatus !== 'connected'}
+            className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 shadow-lg transition-all"
           >
             <Camera className="h-5 w-5" />
             <span>Start Camera</span>
@@ -301,7 +345,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
             {!image ? (
               <button
                 onClick={captureImage}
-                className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 flex-1 min-w-[200px]"
+                className="bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 flex-1 min-w-[200px] shadow-lg transition-all"
               >
                 <Camera className="h-5 w-5" />
                 <span>Capture Image</span>
@@ -310,25 +354,25 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
               <>
                 <button
                   onClick={retakeImage}
-                  className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3"
+                  className="bg-gradient-to-r from-gray-500 to-gray-600 hover:from-gray-600 hover:to-gray-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 shadow transition-all"
                 >
                   <RotateCw className="h-5 w-5" />
                   <span>Retake</span>
                 </button>
                 <button
-                  onClick={mode === 'single' ? detectSingleObject : detectMultipleObjects}
-                  disabled={isUploading}
-                  className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 flex-1 min-w-[200px] disabled:opacity-50"
+                  onClick={detectObjects}
+                  disabled={isUploading || backendStatus !== 'connected'}
+                  className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 flex-1 min-w-[200px] shadow-lg transition-all disabled:opacity-50"
                 >
                   {isUploading ? (
                     <>
                       <Loader2 className="h-5 w-5 animate-spin" />
-                      <span>Analyzing...</span>
+                      <span>AI Processing...</span>
                     </>
                   ) : (
                     <>
                       <Upload className="h-5 w-5" />
-                      <span>{mode === 'single' ? 'Detect Object' : 'Detect Multiple Objects'}</span>
+                      <span>{mode === 'single' ? 'Detect Object' : 'Detect Objects'}</span>
                     </>
                   )}
                 </button>
@@ -336,7 +380,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
             )}
             <button
               onClick={stopCamera}
-              className="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3"
+              className="bg-gradient-to-r from-red-500 to-pink-600 hover:from-red-600 hover:to-pink-700 text-white font-bold py-3 px-6 rounded-lg flex items-center space-x-3 shadow transition-all"
             >
               <X className="h-5 w-5" />
               <span>Stop Camera</span>
@@ -347,36 +391,70 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
 
       {/* Results Display */}
       {predictionResults.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6">
-          <h3 className="text-xl font-bold mb-4 flex items-center">
-            <CheckCircle className="h-6 w-6 text-green-500 mr-2" />
-            Detection Results ({predictionResults.length} object{predictionResults.length > 1 ? 's' : ''})
-          </h3>
+        <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-lg">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="text-2xl font-bold text-gray-800 flex items-center">
+                <CheckCircle className="h-7 w-7 text-green-500 mr-3" />
+                AI Detection Results
+              </h3>
+              <p className="text-gray-600 mt-1">
+                Found {predictionResults.length} object{predictionResults.length > 1 ? 's' : ''} • YOLOv8 Model
+              </p>
+            </div>
+            <div className="px-4 py-2 bg-blue-50 text-blue-700 rounded-lg font-medium">
+              Real AI Detection
+            </div>
+          </div>
           
-          <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {predictionResults.map((result, index) => (
-              <div key={result.id} className="p-4 border border-gray-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
+              <div key={result.id} className="p-5 border border-gray-200 rounded-xl hover:shadow-md transition">
+                <div className="flex items-start justify-between mb-3">
                   <div>
-                    <h4 className="font-bold text-lg">{result.name}</h4>
-                    <p className="text-gray-600 text-sm">{result.category}</p>
+                    <h4 className="font-bold text-lg text-gray-800">{result.name}</h4>
+                    <div className="flex items-center space-x-2 mt-1">
+                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${getWasteColor(result.class)}`}>
+                        {result.class.toUpperCase()}
+                      </span>
+                      <span className="text-sm text-gray-500">{result.category}</span>
+                    </div>
                   </div>
-                  <span className={`px-3 py-1 rounded-full font-bold ${getWasteColor(result.class)}`}>
-                    {result.class.toUpperCase()}
-                  </span>
+                  <div className="text-right">
+                    <div className="text-2xl font-bold text-gray-800">
+                      {Math.round(result.confidence * 100)}%
+                    </div>
+                    <div className="text-xs text-gray-500">AI Confidence</div>
+                  </div>
                 </div>
-                <div className="mt-2">
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-sm text-gray-600">Confidence</span>
-                    <span className="font-bold">{Math.round(result.confidence * 100)}%</span>
+                
+                <div className="mt-4">
+                  <div className="flex justify-between text-sm text-gray-600 mb-1">
+                    <span>Confidence Level</span>
+                    <span>{Math.round(result.confidence * 100)}%</span>
                   </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
                     <div 
-                      className="bg-blue-500 h-2 rounded-full"
+                      className={`h-2.5 rounded-full ${
+                        result.confidence > 0.7 ? 'bg-green-500' :
+                        result.confidence > 0.4 ? 'bg-yellow-500' : 'bg-red-500'
+                      }`}
                       style={{ width: `${result.confidence * 100}%` }}
                     ></div>
                   </div>
                 </div>
+                
+                {result.description && (
+                  <p className="mt-4 text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">
+                    {result.description}
+                  </p>
+                )}
+                
+                {result.bbox && (
+                  <div className="mt-3 text-xs text-gray-500">
+                    Bounding Box: x:{result.bbox.x?.toFixed(1)} y:{result.bbox.y?.toFixed(1)} w:{result.bbox.width?.toFixed(1)} h:{result.bbox.height?.toFixed(1)}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -384,14 +462,17 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       )}
 
       {/* Data Management */}
-      <div className="border-t border-gray-200 pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
-          <h3 className="text-xl font-bold text-gray-800">Detection History</h3>
+      <div className="border-t border-gray-200 pt-8">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div>
+            <h3 className="text-2xl font-bold text-gray-800">Detection History</h3>
+            <p className="text-gray-600">Track your waste detection records</p>
+          </div>
           <div className="flex flex-wrap gap-3">
             <button
               onClick={exportToCSV}
               disabled={detectionHistory.length === 0}
-              className="bg-green-500 hover:bg-green-600 text-white font-medium py-2 px-4 rounded-lg flex items-center space-x-2 disabled:opacity-50"
+              className="bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-600 hover:to-teal-700 text-white font-medium py-2.5 px-5 rounded-lg flex items-center space-x-2 shadow transition disabled:opacity-50"
             >
               <span>📥</span>
               <span>Export CSV</span>
@@ -400,7 +481,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
             <button
               onClick={clearData}
               disabled={detectionHistory.length === 0}
-              className="bg-red-500 hover:bg-red-600 text-white font-medium py-2 px-4 rounded-lg flex items-center space-x-2 disabled:opacity-50"
+              className="bg-gradient-to-r from-red-500 to-rose-600 hover:from-red-600 hover:to-rose-700 text-white font-medium py-2.5 px-5 rounded-lg flex items-center space-x-2 shadow transition disabled:opacity-50"
             >
               <span>🗑️</span>
               <span>Clear Data</span>
@@ -409,56 +490,78 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-            <div className="text-2xl font-bold text-gray-800">{detectionCount}</div>
-            <div className="text-sm text-gray-600">Total Detections</div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-6 rounded-2xl border border-blue-200">
+            <div className="text-4xl font-bold text-gray-800">{detectionCount}</div>
+            <div className="text-blue-700 font-medium mt-2">Total Detections</div>
+            <div className="text-sm text-gray-600 mt-1">Objects detected by AI</div>
           </div>
-          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-            <div className="text-2xl font-bold text-gray-800">
+          <div className="bg-gradient-to-br from-green-50 to-green-100 p-6 rounded-2xl border border-green-200">
+            <div className="text-4xl font-bold text-gray-800">
               {detectionHistory.length > 0 
                 ? Math.round(detectionHistory.reduce((sum, item) => sum + item.confidence, 0) / detectionHistory.length)
                 : 0}%
             </div>
-            <div className="text-sm text-gray-600">Avg Confidence</div>
+            <div className="text-green-700 font-medium mt-2">Avg AI Confidence</div>
+            <div className="text-sm text-gray-600 mt-1">Average detection accuracy</div>
           </div>
-          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-            <div className="text-2xl font-bold text-gray-800">{detectionHistory.length}</div>
-            <div className="text-sm text-gray-600">Records</div>
+          <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-6 rounded-2xl border border-purple-200">
+            <div className="text-4xl font-bold text-gray-800">{detectionHistory.length}</div>
+            <div className="text-purple-700 font-medium mt-2">Records</div>
+            <div className="text-sm text-gray-600 mt-1">Historical detection entries</div>
           </div>
         </div>
 
         {/* Recent Detections Table */}
         {detectionHistory.length > 0 && (
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <div className="overflow-x-auto">
+          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow">
+            <h4 className="text-lg font-bold text-gray-800 mb-4">Recent Detections</h4>
+            <div className="overflow-x-auto rounded-lg border border-gray-100">
               <table className="min-w-full">
                 <thead>
-                  <tr className="border-b border-gray-200">
-                    <th className="text-left py-2 px-3 text-gray-600 font-medium">Time</th>
-                    <th className="text-left py-2 px-3 text-gray-600 font-medium">Object</th>
-                    <th className="text-left py-2 px-3 text-gray-600 font-medium">Category</th>
-                    <th className="text-left py-2 px-3 text-gray-600 font-medium">Confidence</th>
+                  <tr className="bg-gray-50">
+                    <th className="text-left py-4 px-6 text-gray-700 font-semibold">Time</th>
+                    <th className="text-left py-4 px-6 text-gray-700 font-semibold">Object</th>
+                    <th className="text-left py-4 px-6 text-gray-700 font-semibold">Category</th>
+                    <th className="text-left py-4 px-6 text-gray-700 font-semibold">AI Confidence</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-gray-100">
                   {detectionHistory.slice(0, 5).map((item) => (
-                    <tr key={item.id} className="border-b border-gray-100 last:border-b-0">
-                      <td className="py-2 px-3 text-gray-700 text-sm">
-                        {item.timestamp.split(',')[1]?.trim() || item.timestamp}
+                    <tr key={item.id} className="hover:bg-gray-50 transition">
+                      <td className="py-4 px-6">
+                        <div className="text-gray-700 font-medium">{item.timestamp.split(',')[1]?.trim() || item.timestamp}</div>
                       </td>
-                      <td className="py-2 px-3 font-medium text-gray-800">{item.name}</td>
-                      <td className="py-2 px-3">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          item.category === 'recyclable' ? 'bg-blue-100 text-blue-800' :
-                          item.category === 'biodegradable' ? 'bg-green-100 text-green-800' :
-                          'bg-red-100 text-red-800'
+                      <td className="py-4 px-6">
+                        <div className="font-semibold text-gray-800">{item.name}</div>
+                      </td>
+                      <td className="py-4 px-6">
+                        <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                          item.category === 'recyclable' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
+                          item.category === 'biodegradable' ? 'bg-green-100 text-green-800 border border-green-200' :
+                          'bg-red-100 text-red-800 border border-red-200'
                         }`}>
                           {item.category}
                         </span>
                       </td>
-                      <td className="py-2 px-3">
-                        <span className="font-medium">{item.confidence}%</span>
+                      <td className="py-4 px-6">
+                        <div className="flex items-center">
+                          <div className="w-24 bg-gray-200 rounded-full h-2.5 mr-3">
+                            <div 
+                              className={`h-2.5 rounded-full ${
+                                item.confidence > 70 ? 'bg-green-500' :
+                                item.confidence > 40 ? 'bg-yellow-500' : 'bg-red-500'
+                              }`}
+                              style={{ width: `${item.confidence}%` }}
+                            ></div>
+                          </div>
+                          <span className={`font-bold ${
+                            item.confidence > 70 ? 'text-green-600' :
+                            item.confidence > 40 ? 'text-yellow-600' : 'text-red-600'
+                          }`}>
+                            {item.confidence}%
+                          </span>
+                        </div>
                       </td>
                     </tr>
                   ))}
