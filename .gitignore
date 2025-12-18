@@ -2,3 +2,5 @@ backend/kaggle_raw/
 *.jpg
 *.png
 *.jpeg
+*.zip
+
