@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { Camera, Upload, RotateCw, X, Loader2, CheckCircle } from 'lucide-react';
+import { Camera, Upload, RotateCw, X, Loader2, CheckCircle, BarChart3, Info, AlertCircle } from 'lucide-react';
 import { wasteAPI } from '../services/api';
 
 const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
@@ -14,22 +14,22 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
   const [detectionHistory, setDetectionHistory] = useState([]);
   const [backendStatus, setBackendStatus] = useState('checking');
   const [error, setError] = useState(null);
+  const [wasteStats, setWasteStats] = useState(null);
+  const [showWasteGuide, setShowWasteGuide] = useState(false);
+  const [detectionExamples, setDetectionExamples] = useState([]);
 
   // Check backend health on component mount
   useEffect(() => {
     checkBackendHealth();
+    fetchWasteStats();
+    fetchDetectionExamples();
   }, []);
 
   const checkBackendHealth = async () => {
     try {
       console.log('Checking backend health...');
       const response = await wasteAPI.checkHealth();
-      console.log('Health response:', response);
-      
-      // FIXED: Axios returns response.data, not response directly
       const healthData = response.data || response;
-      
-      console.log('Health data:', healthData);
       
       if (healthData.status === 'healthy') {
         setBackendStatus('connected');
@@ -38,12 +38,43 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       } else {
         setBackendStatus('error');
         setError(`Backend error: ${healthData.message || 'Unknown error'}`);
-        console.log('❌ Backend not healthy:', healthData);
       }
     } catch (err) {
       console.error('Backend connection error:', err);
       setBackendStatus('disconnected');
       setError('Cannot connect to backend. Make sure it\'s running on port 5001');
+    }
+  };
+
+  const fetchWasteStats = async () => {
+    try {
+      const response = await wasteAPI.getStats();
+      if (response.data.success) {
+        setWasteStats(response.data.stats);
+      }
+    } catch (err) {
+      console.log('Could not fetch waste stats');
+    }
+  };
+
+  const fetchDetectionExamples = async () => {
+    try {
+      const response = await wasteAPI.getDetectionExamples();
+      if (response.data.success) {
+        // Combine all examples into one array for display
+        const examples = [];
+        Object.values(response.data.examples).forEach(categoryExamples => {
+          examples.push(...categoryExamples.slice(0, 2));
+        });
+        setDetectionExamples(examples);
+      }
+    } catch (err) {
+      console.log('Using default detection examples');
+      // Default examples if API fails
+      setDetectionExamples([
+        'Plastic Bottle', 'Banana Peel', 'Battery', 
+        'Aluminum Can', 'Food Waste', 'Glass Jar'
+      ]);
     }
   };
 
@@ -94,23 +125,31 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
     setError(null);
 
     try {
-      console.log('Sending image to backend...');
+      console.log('Sending image to backend for object detection...');
       const response = await wasteAPI.detectWaste(image);
       const data = response.data;
       
-      console.log('Backend detection response:', data);
+      console.log('Object detection response:', data);
 
       if (data.success) {
-        // Process the real detections from YOLOv8
+        // Process the detections from backend
         const processedResults = data.detections.map((detection, index) => ({
-          id: Date.now() + index,
+          id: detection.id || Date.now() + index,
           class: detection.class || 'unknown',
           confidence: detection.confidence ? (detection.confidence / 100) : 0.5,
-          name: detection.name || (detection.class ? detection.class.charAt(0).toUpperCase() + detection.class.slice(1) : 'Unknown'),
-          category: detection.category || (detection.class === 'recyclable' ? 'recyclable' : 'biodegradable'),
-          timestamp: new Date().toLocaleString(),
+          name: detection.name || (detection.class ? detection.class.charAt(0).toUpperCase() + detection.class.slice(1) : 'Unknown Object'),
+          category: detection.category || 'non_recyclable',
+          timestamp: detection.timestamp || new Date().toLocaleString(),
           bbox: detection.bbox || {},
-          description: detection.description || `${detection.class || 'Object'} detected with ${Math.round((detection.confidence || 50))}% confidence.`
+          description: detection.description || `${detection.name || 'Object'} detected`,
+          
+          // Bin information
+          dustbinColor: detection.dustbinColor || 'Black',
+          dustbinName: detection.dustbinName || 'General Waste Bin',
+          disposalInstructions: detection.disposalInstructions || ['Place in appropriate bin'],
+          icon: detection.icon || '🗑️',
+          color: detection.color || '#666666',
+          binInfo: detection.binInfo || {}
         }));
 
         setPredictionResults(processedResults);
@@ -124,10 +163,13 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
           name: obj.name,
           category: obj.category,
           confidence: Math.round(obj.confidence * 100),
-          dustbinColor: obj.category === 'recyclable' ? 'Blue' : 
-                       obj.category === 'biodegradable' ? 'Green' : 'Black',
+          dustbinColor: obj.dustbinColor,
+          dustbinName: obj.dustbinName,
+          disposalInstructions: obj.disposalInstructions,
           description: obj.description,
-          timestamp: obj.timestamp
+          timestamp: obj.timestamp,
+          color: obj.color,
+          icon: obj.icon
         }));
 
         setDetectionHistory(prev => [...detectionDataArray, ...prev.slice(0, 9 - newDetections)]);
@@ -141,7 +183,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
 
         setError(null);
       } else {
-        setError(data.error || 'Detection failed');
+        setError(data.error || 'Object detection failed. Please try again.');
       }
     } catch (err) {
       console.error('Detection error:', err);
@@ -152,19 +194,216 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
     }
   };
 
-  // Get color based on waste type
+  // Function to get bin icon based on bin type
+  const getBinIcon = (binType) => {
+    switch(binType?.toLowerCase()) {
+      case 'green': return '🍃';
+      case 'blue': return '♻️';
+      case 'red': return '⚠️';
+      case 'black': return '🗑️';
+      default: return '🗑️';
+    }
+  };
+
+  // Function to get bin color based on bin type
+  const getBinColor = (binType) => {
+    switch(binType?.toLowerCase()) {
+      case 'green': return '#10b981';
+      case 'blue': return '#3b82f6';
+      case 'red': return '#ef4444';
+      case 'black': return '#374151';
+      default: return '#666666';
+    }
+  };
+
+  // Function to render bin recommendations
+  const renderBinRecommendations = () => {
+    if (!predictionResults || predictionResults.length === 0) {
+      return null;
+    }
+
+    // Group by bin type
+    const bins = {};
+    predictionResults.forEach(detection => {
+      const binType = detection.dustbinColor?.toLowerCase() || detection.category;
+      if (!bins[binType]) {
+        bins[binType] = {
+          color: detection.color || getBinColor(binType),
+          name: detection.dustbinName || `${detection.category} Bin`,
+          icon: detection.icon || getBinIcon(binType),
+          items: [],
+          count: 0,
+          category: detection.category
+        };
+      }
+      bins[binType].items.push(detection);
+      bins[binType].count++;
+    });
+
+    // Sort bins: Green, Blue, Red, Black
+    const sortedBins = Object.entries(bins).sort(([binTypeA], [binTypeB]) => {
+      const order = { 'green': 0, 'blue': 1, 'red': 2, 'black': 3 };
+      return (order[binTypeA] || 4) - (order[binTypeB] || 4);
+    });
+
+    return (
+      <div className="mt-6 bg-white rounded-xl border border-gray-200 p-6 shadow-lg">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-2xl font-bold text-gray-800 flex items-center">
+            <span className="mr-2">🗑️</span>
+            Waste Bin Recommendations
+          </h3>
+          <button 
+            onClick={() => setShowWasteGuide(!showWasteGuide)}
+            className="px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-lg hover:opacity-90 transition flex items-center"
+          >
+            <Info className="h-4 w-4 mr-2" />
+            {showWasteGuide ? 'Hide Guide' : 'Show Guide'}
+          </button>
+        </div>
+        
+        {showWasteGuide && (
+          <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-5">
+            <h4 className="font-bold text-blue-800 mb-3 text-lg">📋 Waste Classification Guide</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white p-4 rounded-lg border-2 border-green-200">
+                <div className="flex items-center mb-2">
+                  <div className="w-8 h-8 rounded-lg bg-green-500 text-white flex items-center justify-center mr-2">🍃</div>
+                  <div className="font-bold text-green-700">Green Bin</div>
+                </div>
+                <div className="text-sm text-gray-600">Biodegradable waste, food scraps, garden waste</div>
+                <div className="text-xs text-green-600 mt-2">Compost within 2-6 weeks</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg border-2 border-blue-200">
+                <div className="flex items-center mb-2">
+                  <div className="w-8 h-8 rounded-lg bg-blue-500 text-white flex items-center justify-center mr-2">♻️</div>
+                  <div className="font-bold text-blue-700">Blue Bin</div>
+                </div>
+                <div className="text-sm text-gray-600">Recyclables: plastic, glass, metal, paper</div>
+                <div className="text-xs text-blue-600 mt-2">Clean and dry before disposal</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg border-2 border-red-200">
+                <div className="flex items-center mb-2">
+                  <div className="w-8 h-8 rounded-lg bg-red-500 text-white flex items-center justify-center mr-2">⚠️</div>
+                  <div className="font-bold text-red-700">Red Bin</div>
+                </div>
+                <div className="text-sm text-gray-600">Hazardous: batteries, chemicals, electronics</div>
+                <div className="text-xs text-red-600 mt-2">Special disposal required</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg border-2 border-gray-300">
+                <div className="flex items-center mb-2">
+                  <div className="w-8 h-8 rounded-lg bg-gray-700 text-white flex items-center justify-center mr-2">🗑️</div>
+                  <div className="font-bold text-gray-700">Black Bin</div>
+                </div>
+                <div className="text-sm text-gray-600">Non-recyclable general waste</div>
+                <div className="text-xs text-gray-600 mt-2">Landfill disposal only</div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {sortedBins.map(([binType, binData]) => (
+            <div key={binType} className="p-5 rounded-xl border-2 shadow-sm" style={{ borderColor: binData.color }}>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center">
+                  <div 
+                    className="w-12 h-12 rounded-lg mr-3 flex items-center justify-center text-white font-bold text-xl"
+                    style={{ backgroundColor: binData.color }}
+                  >
+                    {binData.icon}
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-lg">{binData.name}</h4>
+                    <p className="text-sm text-gray-600">{binData.count} item(s)</p>
+                  </div>
+                </div>
+                <div 
+                  className="px-3 py-1 rounded-full text-white font-medium text-sm"
+                  style={{ backgroundColor: binData.color }}
+                >
+                  {binType.charAt(0).toUpperCase() + binType.slice(1)}
+                </div>
+              </div>
+              
+              <div className="mt-4">
+                <h5 className="font-medium text-gray-700 mb-2">Detected Items:</h5>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {binData.items.map((item, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded hover:bg-gray-100 transition">
+                      <div className="flex items-center">
+                        <span className="mr-2">{item.icon || '📦'}</span>
+                        <span className="text-sm truncate max-w-[120px]">{item.name}</span>
+                      </div>
+                      <span className="font-medium text-sm bg-white px-2 py-1 rounded">
+                        {Math.round(item.confidence * 100)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <h5 className="font-medium text-gray-700 mb-2">Disposal Instructions:</h5>
+                <ul className="text-xs text-gray-600 space-y-1">
+                  {binData.items[0]?.disposalInstructions?.slice(0, 3).map((instruction, idx) => (
+                    <li key={idx} className="flex items-start">
+                      <span className="mr-1">•</span>
+                      <span className="leading-tight">{instruction}</span>
+                    </li>
+                  )) || [
+                    `Place in ${binData.name}`,
+                    'Follow local guidelines',
+                    'Proper disposal required'
+                  ].map((instruction, idx) => (
+                    <li key={idx} className="flex items-start">
+                      <span className="mr-1">•</span>
+                      <span className="leading-tight">{instruction}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        <div className="mt-6 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+          <div className="flex items-center">
+            <span className="text-green-500 mr-2">💡</span>
+            <div>
+              <h5 className="font-medium text-green-800">Waste Sorting Tip:</h5>
+              <p className="text-sm text-green-700">
+                {sortedBins.length > 1 
+                  ? "You have multiple waste types. Please separate them into different colored bins."
+                  : "Place all items in the recommended bin above."}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Get color based on waste type for badges
   const getWasteColor = (type) => {
     const colors = {
-      plastic: 'bg-blue-100 border-blue-200 text-blue-800',
-      paper: 'bg-yellow-100 border-yellow-200 text-yellow-800',
-      glass: 'bg-green-100 border-green-200 text-green-800',
-      metal: 'bg-gray-100 border-gray-200 text-gray-800',
-      organic: 'bg-amber-100 border-amber-200 text-amber-800',
-      hazardous: 'bg-red-100 border-red-200 text-red-800',
+      biodegradable: 'bg-green-100 border-green-200 text-green-800',
       recyclable: 'bg-blue-100 border-blue-200 text-blue-800',
-      biodegradable: 'bg-green-100 border-green-200 text-green-800'
+      hazardous: 'bg-red-100 border-red-200 text-red-800',
+      non_recyclable: 'bg-gray-100 border-gray-200 text-gray-800',
     };
     return colors[type?.toLowerCase()] || 'bg-gray-100 border-gray-200 text-gray-800';
+  };
+
+  // Get category display name
+  const getCategoryDisplayName = (category) => {
+    const names = {
+      biodegradable: 'Biodegradable',
+      recyclable: 'Recyclable',
+      hazardous: 'Hazardous',
+      non_recyclable: 'Non-Recyclable'
+    };
+    return names[category?.toLowerCase()] || category || 'Unknown';
   };
 
   // Export to CSV
@@ -174,15 +413,16 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       return;
     }
 
-    const headers = ['Timestamp', 'Object Name', 'Category', 'Confidence %', 'Dustbin Color'];
+    const headers = ['Timestamp', 'Object Name', 'Category', 'Bin Color', 'Bin Name', 'AI Confidence %'];
     const csvRows = [
       headers.join(','),
       ...detectionHistory.map(item => [
         `"${item.timestamp}"`,
         `"${item.name}"`,
-        `"${item.category}"`,
-        item.confidence,
-        `"${item.dustbinColor}"`
+        `"${getCategoryDisplayName(item.category)}"`,
+        `"${item.dustbinColor}"`,
+        `"${item.dustbinName}"`,
+        item.confidence
       ].join(','))
     ];
 
@@ -214,17 +454,51 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
   const getStatusIndicator = () => {
     switch (backendStatus) {
       case 'connected':
-        return { text: '✅ Backend Connected', color: 'bg-green-500' };
+        return { text: '✅ Backend Connected', color: 'bg-green-500', icon: '✅' };
       case 'checking':
-        return { text: '🔄 Checking Backend...', color: 'bg-yellow-500' };
+        return { text: '🔄 Checking Backend...', color: 'bg-yellow-500', icon: '🔄' };
       case 'error':
-        return { text: '❌ Backend Error', color: 'bg-red-500' };
+        return { text: '❌ Backend Error', color: 'bg-red-500', icon: '❌' };
       default:
-        return { text: '❌ Backend Disconnected', color: 'bg-red-500' };
+        return { text: '❌ Backend Disconnected', color: 'bg-red-500', icon: '❌' };
     }
   };
 
   const status = getStatusIndicator();
+
+  // Calculate waste distribution
+  const calculateWasteDistribution = () => {
+    if (predictionResults.length === 0) return null;
+    
+    const counts = {
+      biodegradable: 0,
+      recyclable: 0,
+      hazardous: 0,
+      non_recyclable: 0
+    };
+    
+    predictionResults.forEach(item => {
+      const category = item.category?.toLowerCase();
+      if (counts.hasOwnProperty(category)) {
+        counts[category]++;
+      }
+    });
+    
+    const total = predictionResults.length;
+    
+    return {
+      biodegradable: counts.biodegradable,
+      recyclable: counts.recyclable,
+      hazardous: counts.hazardous,
+      non_recyclable: counts.non_recyclable,
+      biodegradablePercent: Math.round((counts.biodegradable / total) * 100),
+      recyclablePercent: Math.round((counts.recyclable / total) * 100),
+      hazardousPercent: Math.round((counts.hazardous / total) * 100),
+      non_recyclablePercent: Math.round((counts.non_recyclable / total) * 100)
+    };
+  };
+
+  const wasteDistribution = calculateWasteDistribution();
 
   return (
     <div className="space-y-6">
@@ -232,11 +506,12 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       <div className={`text-white px-4 py-3 rounded-lg ${status.color}`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center">
+            <span className="text-lg mr-2">{status.icon}</span>
             <span className="font-medium">{status.text}</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="text-sm opacity-90">
-              Port: 5001 • Model: {backendStatus === 'connected' ? 'Loaded' : 'Offline'}
+              Port: 5001 • Bins: 4 • Object Detection: {backendStatus === 'connected' ? 'Ready' : 'Offline'}
             </span>
             <button 
               onClick={checkBackendHealth}
@@ -252,7 +527,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
           <div className="flex items-center">
-            <span className="mr-2">⚠️</span>
+            <AlertCircle className="h-5 w-5 mr-2" />
             <span>{error}</span>
           </div>
           {backendStatus === 'disconnected' && (
@@ -262,6 +537,30 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
           )}
         </div>
       )}
+
+      {/* Object Detection Banner */}
+      <div className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-xl">AI Object Detection</h3>
+            <p className="text-sm opacity-90 mt-1">
+              Point camera at waste objects. AI will detect and classify into 4 bins automatically.
+            </p>
+          </div>
+          {detectionExamples.length > 0 && (
+            <div className="hidden md:block">
+              <div className="text-sm opacity-90 mb-1">Try detecting:</div>
+              <div className="flex flex-wrap gap-2">
+                {detectionExamples.slice(0, 4).map((example, idx) => (
+                  <span key={idx} className="bg-white bg-opacity-20 px-3 py-1 rounded text-xs">
+                    {example}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Mode Selection */}
       <div className="flex flex-wrap gap-3">
@@ -321,7 +620,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
                 </div>
               ) : (
                 <div className="text-white text-sm opacity-75">
-                  Click "Start Camera" to begin
+                  Click "Start Camera" to begin object detection
                 </div>
               )}
             </div>
@@ -367,7 +666,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
                   {isUploading ? (
                     <>
                       <Loader2 className="h-5 w-5 animate-spin" />
-                      <span>AI Processing...</span>
+                      <span>Detecting Objects...</span>
                     </>
                   ) : (
                     <>
@@ -391,73 +690,143 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
 
       {/* Results Display */}
       {predictionResults.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-lg">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h3 className="text-2xl font-bold text-gray-800 flex items-center">
-                <CheckCircle className="h-7 w-7 text-green-500 mr-3" />
-                AI Detection Results
-              </h3>
-              <p className="text-gray-600 mt-1">
-                Found {predictionResults.length} object{predictionResults.length > 1 ? 's' : ''} • YOLOv8 Model
-              </p>
-            </div>
-            <div className="px-4 py-2 bg-blue-50 text-blue-700 rounded-lg font-medium">
-              Real AI Detection
-            </div>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {predictionResults.map((result, index) => (
-              <div key={result.id} className="p-5 border border-gray-200 rounded-xl hover:shadow-md transition">
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <h4 className="font-bold text-lg text-gray-800">{result.name}</h4>
-                    <div className="flex items-center space-x-2 mt-1">
-                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${getWasteColor(result.class)}`}>
-                        {result.class.toUpperCase()}
-                      </span>
-                      <span className="text-sm text-gray-500">{result.category}</span>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-2xl font-bold text-gray-800">
-                      {Math.round(result.confidence * 100)}%
-                    </div>
-                    <div className="text-xs text-gray-500">AI Confidence</div>
-                  </div>
+        <div className="space-y-6">
+          {/* AI Detection Results */}
+          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-lg">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-2xl font-bold text-gray-800 flex items-center">
+                  <CheckCircle className="h-7 w-7 text-green-500 mr-3" />
+                  Object Detection Results
+                </h3>
+                <p className="text-gray-600 mt-1">
+                  Found {predictionResults.length} object{predictionResults.length > 1 ? 's' : ''} • YOLOv8 AI Model
+                </p>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="px-4 py-2 bg-blue-50 text-blue-700 rounded-lg font-medium">
+                  Real-time AI
                 </div>
-                
-                <div className="mt-4">
-                  <div className="flex justify-between text-sm text-gray-600 mb-1">
-                    <span>Confidence Level</span>
-                    <span>{Math.round(result.confidence * 100)}%</span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2.5">
-                    <div 
-                      className={`h-2.5 rounded-full ${
-                        result.confidence > 0.7 ? 'bg-green-500' :
-                        result.confidence > 0.4 ? 'bg-yellow-500' : 'bg-red-500'
-                      }`}
-                      style={{ width: `${result.confidence * 100}%` }}
-                    ></div>
-                  </div>
-                </div>
-                
-                {result.description && (
-                  <p className="mt-4 text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">
-                    {result.description}
-                  </p>
-                )}
-                
-                {result.bbox && (
-                  <div className="mt-3 text-xs text-gray-500">
-                    Bounding Box: x:{result.bbox.x?.toFixed(1)} y:{result.bbox.y?.toFixed(1)} w:{result.bbox.width?.toFixed(1)} h:{result.bbox.height?.toFixed(1)}
+                {wasteDistribution && (
+                  <div className="px-4 py-2 bg-green-50 text-green-700 rounded-lg font-medium">
+                    🍃 {wasteDistribution.biodegradable + wasteDistribution.recyclable} Recyclable/Compostable
                   </div>
                 )}
               </div>
-            ))}
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {predictionResults.map((result, index) => (
+                <div key={result.id} className="p-5 border border-gray-200 rounded-xl hover:shadow-md transition">
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h4 className="font-bold text-lg text-gray-800">{result.name}</h4>
+                      <div className="flex items-center space-x-2 mt-1">
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${getWasteColor(result.category)}`}>
+                          {getCategoryDisplayName(result.category)}
+                        </span>
+                        <span className="text-sm text-gray-500">Object #{index + 1}</span>
+                      </div>
+                      {/* Bin indicator */}
+                      <div className="flex items-center mt-2">
+                        <div 
+                          className="w-4 h-4 rounded mr-2"
+                          style={{ backgroundColor: result.color }}
+                        ></div>
+                        <span className="text-sm font-medium text-gray-700">
+                          {result.dustbinName}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-2xl font-bold text-gray-800">
+                        {Math.round(result.confidence * 100)}%
+                      </div>
+                      <div className="text-xs text-gray-500">AI Confidence</div>
+                    </div>
+                  </div>
+                  
+                  <div className="mt-4">
+                    <div className="flex justify-between text-sm text-gray-600 mb-1">
+                      <span>Detection Confidence</span>
+                      <span>{Math.round(result.confidence * 100)}%</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2.5">
+                      <div 
+                        className={`h-2.5 rounded-full ${
+                          result.confidence > 0.7 ? 'bg-green-500' :
+                          result.confidence > 0.4 ? 'bg-yellow-500' : 'bg-red-500'
+                        }`}
+                        style={{ width: `${result.confidence * 100}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                  
+                  {result.description && (
+                    <p className="mt-4 text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">
+                      {result.description}
+                    </p>
+                  )}
+                  
+                  {/* Disposal Instructions */}
+                  {result.disposalInstructions && result.disposalInstructions.length > 0 && (
+                    <div className="mt-3">
+                      <h5 className="text-sm font-medium text-gray-700 mb-2">Disposal Instructions:</h5>
+                      <ul className="text-xs text-gray-600 space-y-1">
+                        {result.disposalInstructions.slice(0, 3).map((instruction, idx) => (
+                          <li key={idx} className="flex items-start">
+                            <span className="mr-2">•</span>
+                            <span>{instruction}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
+
+          {/* Waste Distribution Summary */}
+          {wasteDistribution && (
+            <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-6">
+              <h3 className="text-2xl font-bold text-gray-800 mb-4 flex items-center">
+                <span className="mr-2">📊</span>
+                Waste Distribution Summary
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white p-4 rounded-lg border border-green-200">
+                  <div className="text-3xl font-bold text-green-600">{wasteDistribution.biodegradable}</div>
+                  <div className="text-sm font-medium text-gray-700">Biodegradable</div>
+                  <div className="text-xs text-gray-500">{wasteDistribution.biodegradablePercent}% of total</div>
+                </div>
+                <div className="bg-white p-4 rounded-lg border border-blue-200">
+                  <div className="text-3xl font-bold text-blue-600">{wasteDistribution.recyclable}</div>
+                  <div className="text-sm font-medium text-gray-700">Recyclable</div>
+                  <div className="text-xs text-gray-500">{wasteDistribution.recyclablePercent}% of total</div>
+                </div>
+                <div className="bg-white p-4 rounded-lg border border-red-200">
+                  <div className="text-3xl font-bold text-red-600">{wasteDistribution.hazardous}</div>
+                  <div className="text-sm font-medium text-gray-700">Hazardous</div>
+                  <div className="text-xs text-gray-500">{wasteDistribution.hazardousPercent}% of total</div>
+                </div>
+                <div className="bg-white p-4 rounded-lg border border-gray-300">
+                  <div className="text-3xl font-bold text-gray-600">{wasteDistribution.non_recyclable}</div>
+                  <div className="text-sm font-medium text-gray-700">Non-Recyclable</div>
+                  <div className="text-xs text-gray-500">{wasteDistribution.non_recyclablePercent}% of total</div>
+                </div>
+              </div>
+              <div className="mt-4 text-sm text-gray-600">
+                <p>✅ Total items detected: {predictionResults.length}</p>
+                <p className="mt-1">
+                  🌿 Environmental impact: {wasteDistribution.biodegradable + wasteDistribution.recyclable} items can be recycled/composted
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Bin Recommendations */}
+          {renderBinRecommendations()}
         </div>
       )}
 
@@ -466,7 +835,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div>
             <h3 className="text-2xl font-bold text-gray-800">Detection History</h3>
-            <p className="text-gray-600">Track your waste detection records</p>
+            <p className="text-gray-600">Track your object detection records</p>
           </div>
           <div className="flex flex-wrap gap-3">
             <button
@@ -490,7 +859,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-6 rounded-2xl border border-blue-200">
             <div className="text-4xl font-bold text-gray-800">{detectionCount}</div>
             <div className="text-blue-700 font-medium mt-2">Total Detections</div>
@@ -510,6 +879,13 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
             <div className="text-purple-700 font-medium mt-2">Records</div>
             <div className="text-sm text-gray-600 mt-1">Historical detection entries</div>
           </div>
+          <div className="bg-gradient-to-br from-amber-50 to-orange-100 p-6 rounded-2xl border border-amber-200">
+            <div className="text-4xl font-bold text-gray-800">
+              {new Set(detectionHistory.map(item => item.category)).size}
+            </div>
+            <div className="text-amber-700 font-medium mt-2">Categories</div>
+            <div className="text-sm text-gray-600 mt-1">Different waste types detected</div>
+          </div>
         </div>
 
         {/* Recent Detections Table */}
@@ -523,6 +899,7 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
                     <th className="text-left py-4 px-6 text-gray-700 font-semibold">Time</th>
                     <th className="text-left py-4 px-6 text-gray-700 font-semibold">Object</th>
                     <th className="text-left py-4 px-6 text-gray-700 font-semibold">Category</th>
+                    <th className="text-left py-4 px-6 text-gray-700 font-semibold">Bin</th>
                     <th className="text-left py-4 px-6 text-gray-700 font-semibold">AI Confidence</th>
                   </tr>
                 </thead>
@@ -530,32 +907,44 @@ const CameraSection = ({ onSingleDetection, onObjectsDetected }) => {
                   {detectionHistory.slice(0, 5).map((item) => (
                     <tr key={item.id} className="hover:bg-gray-50 transition">
                       <td className="py-4 px-6">
-                        <div className="text-gray-700 font-medium">{item.timestamp.split(',')[1]?.trim() || item.timestamp}</div>
+                        <div className="text-gray-700 font-medium text-sm">
+                          {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
                       </td>
                       <td className="py-4 px-6">
                         <div className="font-semibold text-gray-800">{item.name}</div>
                       </td>
                       <td className="py-4 px-6">
-                        <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                        <span className={`px-3 py-1.5 rounded-full text-xs font-medium ${
                           item.category === 'recyclable' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
                           item.category === 'biodegradable' ? 'bg-green-100 text-green-800 border border-green-200' :
-                          'bg-red-100 text-red-800 border border-red-200'
+                          item.category === 'hazardous' ? 'bg-red-100 text-red-800 border border-red-200' :
+                          'bg-gray-100 text-gray-800 border border-gray-300'
                         }`}>
-                          {item.category}
+                          {getCategoryDisplayName(item.category)}
                         </span>
                       </td>
                       <td className="py-4 px-6">
                         <div className="flex items-center">
-                          <div className="w-24 bg-gray-200 rounded-full h-2.5 mr-3">
+                          <div 
+                            className="w-3 h-3 rounded mr-2"
+                            style={{ backgroundColor: item.color || '#666666' }}
+                          ></div>
+                          <span className="text-sm text-gray-700">{item.dustbinName}</span>
+                        </div>
+                      </td>
+                      <td className="py-4 px-6">
+                        <div className="flex items-center">
+                          <div className="w-20 bg-gray-200 rounded-full h-2 mr-3">
                             <div 
-                              className={`h-2.5 rounded-full ${
+                              className={`h-2 rounded-full ${
                                 item.confidence > 70 ? 'bg-green-500' :
                                 item.confidence > 40 ? 'bg-yellow-500' : 'bg-red-500'
                               }`}
-                              style={{ width: `${item.confidence}%` }}
+                              style={{ width: `${Math.min(item.confidence, 100)}%` }}
                             ></div>
                           </div>
-                          <span className={`font-bold ${
+                          <span className={`font-bold text-sm ${
                             item.confidence > 70 ? 'text-green-600' :
                             item.confidence > 40 ? 'text-yellow-600' : 'text-red-600'
                           }`}>
